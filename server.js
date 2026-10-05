@@ -29,8 +29,10 @@ let viewOnceSaverEnabled = true;
 
 // Active spam/loop targets
 const activeTargets = new Set();
-// Message store (Anti-Delete ke liye last 1500 messages cache)
+// Message store (Anti-Delete ke liye last 2000 messages cache)
 const messageStore = new Map();
+// Deleted messages store (Android App logs ke liye)
+const deletedLogs = [];
 
 async function startWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -72,7 +74,7 @@ async function startWhatsApp() {
         }
     });
 
-    // 1. Messages Listener & Cache Store (Anti-Delete + View-Once + Commands)
+    // Messages Listener & Cache Store
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg || !msg.message) return;
@@ -80,8 +82,8 @@ async function startWhatsApp() {
         const fromJid = msg.key.remoteJid;
         const msgId = msg.key.id;
 
-        // Cache incoming messages for Anti-Delete
-        if (messageStore.size > 1500) {
+        // Cache messages for Anti-Delete
+        if (messageStore.size > 2000) {
             const firstKey = messageStore.keys().next().value;
             messageStore.delete(firstKey);
         }
@@ -93,7 +95,6 @@ async function startWhatsApp() {
             if (isViewOnce) {
                 try {
                     const actualMsg = isViewOnce.message;
-                    console.log(`[VIEW-ONCE DETECTED] from ${fromJid}`);
                     if (actualMsg.imageMessage) {
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
                         await sock.sendMessage(fromJid, { 
@@ -113,7 +114,7 @@ async function startWhatsApp() {
             }
         }
 
-        // Feature: Remote Commands
+        // Remote Commands (x and z)
         if (msg.key.fromMe) {
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             const cleanText = text.toLowerCase().trim();
@@ -145,7 +146,7 @@ async function startWhatsApp() {
             }
         }
 
-        // Feature: AI / Auto-Reply Mode
+        // AI Auto Reply
         if (aiAutoReplyEnabled && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
             const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
             if (incomingText) {
@@ -156,7 +157,7 @@ async function startWhatsApp() {
         }
     });
 
-    // Feature 2: Anti-Delete Detection (Usi chat me alert + Quoted response)
+    // Anti-Delete (Samne wale ko koi sms nahi jayega, sirf app ke logs mein save hoga)
     sock.ev.on('messages.update', async (updates) => {
         if (!antiDeleteEnabled) return;
 
@@ -170,20 +171,20 @@ async function startWhatsApp() {
                 const cached = messageStore.get(deletedMsgId);
 
                 if (cached && !cached.key.fromMe) {
-                    const sender = cached.key.remoteJid;
+                    const sender = cached.key.remoteJid.split('@')[0];
                     const text = cached.message.conversation || 
                                  cached.message.extendedTextMessage?.text || 
-                                 "[Media File ya Sticker]";
+                                 "[Media / Photo / Audio]";
 
-                    console.log(`[DELETED MESSAGE RECOVERED] Sender: ${sender}, Text: ${text}`);
+                    console.log(`[DELETED DETECTED] From: ${sender}, Text: ${text}`);
 
-                    try {
-                        await sock.sendMessage(sender, {
-                            text: `🚨 *ANTI-DELETE ALERT!*\n\nDeleted message: "${text}"`
-                        }, { quoted: cached });
-                    } catch (err) {
-                        console.error("Anti-delete alert send error:", err);
-                    }
+                    deletedLogs.unshift({
+                        id: deletedMsgId,
+                        sender: sender,
+                        text: text
+                    });
+
+                    if (deletedLogs.length > 50) deletedLogs.pop();
                 }
             }
         }
@@ -192,9 +193,8 @@ async function startWhatsApp() {
 
 startWhatsApp();
 
-// --- REST APIs for Android App ---
+// --- REST APIs ---
 
-// Config API
 app.get('/config', (req, res) => {
     res.json({
         message: currentMessage,
@@ -210,7 +210,6 @@ app.post('/config', (req, res) => {
     if (message !== undefined) currentMessage = message.trim();
     if (delaySeconds !== undefined) {
         let sec = parseFloat(delaySeconds);
-        // Minimum 100ms (0.1s)
         currentDelayMs = Math.max(100, Math.round(sec * 1000));
     }
     if (aiAutoReply !== undefined) aiAutoReplyEnabled = Boolean(aiAutoReply);
@@ -220,27 +219,8 @@ app.post('/config', (req, res) => {
     res.json({ success: true, currentMessage, delaySeconds: currentDelayMs / 1000 });
 });
 
-// Broadcast API
-app.post('/broadcast', async (req, res) => {
-    const { numbers, text } = req.body;
-    if (!numbers || !Array.isArray(numbers) || !text) {
-        return res.status(400).json({ error: "Invalid format. 'numbers' array and 'text' required." });
-    }
-
-    res.json({ status: "Broadcast started in background" });
-
-    (async () => {
-        for (const num of numbers) {
-            const jid = num.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-            try {
-                await sock.sendMessage(jid, { text });
-                console.log(`[BROADCAST SENT] to ${jid}`);
-            } catch (e) {
-                console.error(`Broadcast failed for ${jid}:`, e);
-            }
-            await sleep(4000);
-        }
-    })();
+app.get('/deleted-logs', (req, res) => {
+    res.json(deletedLogs);
 });
 
 app.get('/status', (req, res) => {

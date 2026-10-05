@@ -6,6 +6,8 @@ import QRCode from 'qrcode';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json());
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let sock = null;
@@ -13,7 +15,9 @@ let currentQR = null;
 let isConnected = false;
 const activeTargets = new Set();
 
-const defaultMessage = "Automated reply: Yeh system generated message hai.";
+// App se control hone wale dynamic variables
+let currentMessage = "Automated reply: Yeh system generated message hai.";
+let currentDelayMs = 3000; // Default 3 second
 
 async function startWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -22,7 +26,6 @@ async function startWhatsApp() {
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        // Browser define karne se WhatsApp reject nahi karta
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false
     });
@@ -35,7 +38,7 @@ async function startWhatsApp() {
         if (qr) {
             try {
                 currentQR = await QRCode.toDataURL(qr);
-                console.log("[QR] Naya taza QR code generate hua.");
+                console.log("[QR] Naya QR ready hai.");
             } catch (err) {
                 console.error("[QR Error]", err);
             }
@@ -53,7 +56,7 @@ async function startWhatsApp() {
         } else if (connection === 'open') {
             isConnected = true;
             currentQR = null;
-            console.log("✅ WhatsApp successfully connect ho gaya!");
+            console.log("✅ WhatsApp Connected!");
         }
     });
 
@@ -88,14 +91,16 @@ async function startWhatsApp() {
                 (async () => {
                     while (activeTargets.has(targetChat) && isConnected) {
                         try {
-                            await sock.sendMessage(targetChat, { text: defaultMessage });
+                            // Dynamic message send karein
+                            await sock.sendMessage(targetChat, { text: currentMessage });
                             console.log(`[SENT] Message bhej diya: ${targetChat}`);
                         } catch (err) {
                             console.error("[SEND ERROR]", err);
                             activeTargets.delete(targetChat);
                             break;
                         }
-                        await sleep(3000);
+                        // Dynamic delay follow karein
+                        await sleep(currentDelayMs);
                     }
                 })();
             }
@@ -104,6 +109,29 @@ async function startWhatsApp() {
 }
 
 startWhatsApp();
+
+// API: Config fetch karna
+app.get('/config', (req, res) => {
+    res.json({
+        message: currentMessage,
+        delaySeconds: currentDelayMs / 1000
+    });
+});
+
+// API: App se naya message aur delay set karna
+app.post('/config', (req, res) => {
+    const { message, delaySeconds } = req.body;
+    if (message && message.trim()) {
+        currentMessage = message.trim();
+    }
+    if (delaySeconds && !isNaN(delaySeconds)) {
+        let sec = parseFloat(delaySeconds);
+        if (sec < 2) sec = 2; // WhatsApp ban se bachne ke liye minimum 2s
+        currentDelayMs = sec * 1000;
+    }
+    console.log(`[CONFIG UPDATE] Msg: "${currentMessage}", Delay: ${currentDelayMs}ms`);
+    res.json({ success: true, message: currentMessage, delaySeconds: currentDelayMs / 1000 });
+});
 
 app.get('/status', (req, res) => {
     res.json({

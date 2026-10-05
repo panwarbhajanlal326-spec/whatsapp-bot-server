@@ -147,11 +147,10 @@ async function startWhatsApp() {
             }
         }
 
-        // Feature 3: AI Auto-Reply Mode (agar enabled ho aur samne wale ne message kiya ho)
+        // Feature 3: AI Auto-Reply Mode
         if (aiAutoReplyEnabled && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
             const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
             if (incomingText) {
-                // Auto friendly reply template (AI integration ready)
                 await sock.sendMessage(fromJid, { 
                     text: `🤖 [AI Auto-Reply]: Namaste! Main abhi vyast hoon, aapka message mil gaya: "${incomingText}"` 
                 });
@@ -164,7 +163,6 @@ async function startWhatsApp() {
         if (!antiDeleteEnabled) return;
 
         for (const update of updates) {
-            // Agar message revoke/delete hua hai
             if (update.update?.messageStubType === 68 || update.update?.message === null) {
                 const deletedMsgId = update.key.id;
                 const cached = messageStore.get(deletedMsgId);
@@ -192,7 +190,7 @@ startWhatsApp();
 
 // --- REST APIs for Android App ---
 
-// Config API
+// Config API (0.1s Support)
 app.get('/config', (req, res) => {
     res.json({
         message: currentMessage,
@@ -208,8 +206,8 @@ app.post('/config', (req, res) => {
     if (message !== undefined) currentMessage = message.trim();
     if (delaySeconds !== undefined) {
         let sec = parseFloat(delaySeconds);
-        if (sec < 2) sec = 2;
-        currentDelayMs = sec * 1000;
+        // Minimum 100ms (0.1s) allow kar diya gaya hai
+        currentDelayMs = Math.max(100, Math.round(sec * 1000));
     }
     if (aiAutoReply !== undefined) aiAutoReplyEnabled = Boolean(aiAutoReply);
     if (antiDelete !== undefined) antiDeleteEnabled = Boolean(antiDelete);
@@ -236,7 +234,7 @@ app.post('/broadcast', async (req, res) => {
             } catch (e) {
                 console.error(`Broadcast failed for ${jid}:`, e);
             }
-            await sleep(4000); // 4 second delay between broadcasts for safety
+            await sleep(4000);
         }
     })();
 });

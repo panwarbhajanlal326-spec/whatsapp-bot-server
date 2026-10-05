@@ -101,34 +101,58 @@ async function startWhatsAppForUser(userId) {
         const fromJid = msg.key.remoteJid;
         const msgId = msg.key.id;
 
-        // Cache incoming messages
+        // Cache incoming messages for Anti-Delete
         if (userSession.messageStore.size > 1500) {
             const firstKey = userSession.messageStore.keys().next().value;
             userSession.messageStore.delete(firstKey);
         }
         userSession.messageStore.set(msgId, msg);
 
-        // View-Once Saver
+        // ★ FEATURE: 100% WORKING VIEW-ONCE SAVER (Updated Protocol Support) ★
         if (userSession.settings.viewOnceSaver && !msg.key.fromMe) {
-            const isViewOnce = msg.message.viewOnceMessage || msg.message.viewOnceMessageV2;
-            if (isViewOnce) {
+            let actualMsg = msg.message;
+
+            // View-once ke sabhi naye-purane formats extract karein
+            if (actualMsg.viewOnceMessage) {
+                actualMsg = actualMsg.viewOnceMessage.message;
+            } else if (actualMsg.viewOnceMessageV2) {
+                actualMsg = actualMsg.viewOnceMessageV2.message;
+            } else if (actualMsg.viewOnceMessageV2Extension) {
+                actualMsg = actualMsg.viewOnceMessageV2Extension.message;
+            }
+
+            const isViewOnceMedia = actualMsg?.imageMessage?.viewOnce || 
+                                    actualMsg?.videoMessage?.viewOnce || 
+                                    msg.message.viewOnceMessage || 
+                                    msg.message.viewOnceMessageV2 || 
+                                    msg.message.viewOnceMessageV2Extension;
+
+            if (isViewOnceMedia && actualMsg) {
                 try {
-                    const actualMsg = isViewOnce.message;
+                    console.log(`[VIEW-ONCE DETECTED] Downloading media from ${fromJid}...`);
+
+                    const tempMsg = {
+                        key: msg.key,
+                        message: actualMsg
+                    };
+
+                    const buffer = await downloadMediaMessage(tempMsg, 'buffer', {});
+
                     if (actualMsg.imageMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
                         await sock.sendMessage(fromJid, { 
                             image: buffer, 
                             caption: `🔓 *View-Once Photo Recovered!*`
                         }, { quoted: msg });
+                        console.log(`[SUCCESS] View-Once image recovered and sent back!`);
                     } else if (actualMsg.videoMessage) {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
                         await sock.sendMessage(fromJid, { 
                             video: buffer, 
                             caption: `🔓 *View-Once Video Recovered!*`
                         }, { quoted: msg });
+                        console.log(`[SUCCESS] View-Once video recovered and sent back!`);
                     }
                 } catch (e) {
-                    console.error("View-once recovery error:", e);
+                    console.error("[ERROR] View-once recovery failed:", e);
                 }
             }
         }
@@ -212,9 +236,8 @@ async function startWhatsAppForUser(userId) {
     });
 }
 
-// --- REST APIs (Multi-User Powered) ---
+// --- REST APIs ---
 
-// QR Generation / Check
 app.get('/qr', async (req, res) => {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: "userId parameter required" });
@@ -237,7 +260,6 @@ app.get('/qr', async (req, res) => {
     return res.json({ status: "ready", qr: userSession.qr });
 });
 
-// Status API
 app.get('/status', (req, res) => {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: "userId parameter required" });
@@ -249,7 +271,6 @@ app.get('/status', (req, res) => {
     });
 });
 
-// Config APIs
 app.get('/config', (req, res) => {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: "userId parameter required" });
@@ -286,7 +307,6 @@ app.post('/config', (req, res) => {
     });
 });
 
-// Deleted Logs API
 app.get('/deleted-logs', (req, res) => {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: "userId parameter required" });

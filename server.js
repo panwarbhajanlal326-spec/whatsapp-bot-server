@@ -7,6 +7,8 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
+import fs from 'fs';
+import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,35 +17,51 @@ app.use(express.json());
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-let sock = null;
-let currentQR = null;
-let isConnected = false;
-let myJid = null;
+// Multi-Session Memory Store
+// Structure: userId -> { sock, qr, isConnected, myJid, settings, activeTargets, messageStore, deletedLogs }
+const sessions = new Map();
 
-// Dynamic Settings (App se control)
-let currentMessage = "Automated reply: Yeh system generated message hai.";
-let currentDelayMs = 3000;
-let aiAutoReplyEnabled = false;
-let antiDeleteEnabled = true;
-let viewOnceSaverEnabled = true;
+function getOrCreateUserSession(userId) {
+    if (!sessions.has(userId)) {
+        sessions.set(userId, {
+            sock: null,
+            qr: null,
+            isConnected: false,
+            myJid: null,
+            settings: {
+                message: "Automated reply: Yeh system generated message hai.",
+                delayMs: 3000,
+                aiAutoReply: false,
+                antiDelete: true,
+                viewOnceSaver: true
+            },
+            activeTargets: new Set(),
+            messageStore: new Map(),
+            deletedLogs: []
+        });
+    }
+    return sessions.get(userId);
+}
 
-// Active spam/loop targets
-const activeTargets = new Set();
-// Message store (Anti-Delete ke liye last 2000 messages cache)
-const messageStore = new Map();
-// Deleted messages store (Android App logs ke liye)
-const deletedLogs = [];
+async function startWhatsAppForUser(userId) {
+    const userSession = getOrCreateUserSession(userId);
+    const sessionDir = path.join('auth_sessions', userId);
 
-async function startWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    if (!fs.existsSync(sessionDir)) {
+        fs.mkdirSync(sessionDir, { recursive: true });
+    }
 
-    sock = makeWASocket({
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+
+    const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false
     });
+
+    userSession.sock = sock;
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -52,29 +70,30 @@ async function startWhatsApp() {
 
         if (qr) {
             try {
-                currentQR = await QRCode.toDataURL(qr);
-                console.log("[QR] Naya QR code ready hai.");
+                userSession.qr = await QRCode.toDataURL(qr);
+                console.log(`[QR Ready] User: ${userId}`);
             } catch (err) {
-                console.error("[QR Error]", err);
+                console.error(`[QR Error] User: ${userId}`, err);
             }
         }
 
         if (connection === 'close') {
-            isConnected = false;
-            currentQR = null;
+            userSession.isConnected = false;
+            userSession.qr = null;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            console.log(`Connection closed (code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
-            if (shouldReconnect) startWhatsApp();
+            console.log(`[Session Closed] User: ${userId}, Code: ${statusCode}, Reconnect: ${shouldReconnect}`);
+            if (shouldReconnect) {
+                startWhatsAppForUser(userId);
+            }
         } else if (connection === 'open') {
-            isConnected = true;
-            currentQR = null;
-            myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            console.log(`✅ WhatsApp Connected! Logged in as: ${myJid}`);
+            userSession.isConnected = true;
+            userSession.qr = null;
+            userSession.myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            console.log(`✅ [Connected] User: ${userId} as ${userSession.myJid}`);
         }
     });
 
-    // Messages Listener & Cache Store
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg || !msg.message) return;
@@ -82,15 +101,15 @@ async function startWhatsApp() {
         const fromJid = msg.key.remoteJid;
         const msgId = msg.key.id;
 
-        // Cache messages for Anti-Delete
-        if (messageStore.size > 2000) {
-            const firstKey = messageStore.keys().next().value;
-            messageStore.delete(firstKey);
+        // Cache incoming messages
+        if (userSession.messageStore.size > 1500) {
+            const firstKey = userSession.messageStore.keys().next().value;
+            userSession.messageStore.delete(firstKey);
         }
-        messageStore.set(msgId, msg);
+        userSession.messageStore.set(msgId, msg);
 
-        // Feature: View-Once Saver
-        if (viewOnceSaverEnabled && !msg.key.fromMe) {
+        // View-Once Saver
+        if (userSession.settings.viewOnceSaver && !msg.key.fromMe) {
             const isViewOnce = msg.message.viewOnceMessage || msg.message.viewOnceMessageV2;
             if (isViewOnce) {
                 try {
@@ -114,31 +133,31 @@ async function startWhatsApp() {
             }
         }
 
-        // Remote Commands (x and z)
+        // Loop commands (z to start, x to stop)
         if (msg.key.fromMe) {
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             const cleanText = text.toLowerCase().trim();
 
             if (cleanText === 'stop' || cleanText === 'x') {
-                if (activeTargets.has(fromJid)) {
-                    activeTargets.delete(fromJid);
+                if (userSession.activeTargets.has(fromJid)) {
+                    userSession.activeTargets.delete(fromJid);
                     await sock.sendMessage(fromJid, { text: "🛑 Loop stopped." });
                 }
                 return;
             }
 
             if (cleanText === 'z') {
-                if (!activeTargets.has(fromJid)) {
-                    activeTargets.add(fromJid);
+                if (!userSession.activeTargets.has(fromJid)) {
+                    userSession.activeTargets.add(fromJid);
                     (async () => {
-                        while (activeTargets.has(fromJid) && isConnected) {
+                        while (userSession.activeTargets.has(fromJid) && userSession.isConnected) {
                             try {
-                                await sock.sendMessage(fromJid, { text: currentMessage });
+                                await sock.sendMessage(fromJid, { text: userSession.settings.message });
                             } catch (err) {
-                                activeTargets.delete(fromJid);
+                                userSession.activeTargets.delete(fromJid);
                                 break;
                             }
-                            await sleep(currentDelayMs);
+                            await sleep(userSession.settings.delayMs);
                         }
                     })();
                 }
@@ -146,8 +165,8 @@ async function startWhatsApp() {
             }
         }
 
-        // AI Auto Reply
-        if (aiAutoReplyEnabled && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
+        // Auto Reply
+        if (userSession.settings.aiAutoReply && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
             const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
             if (incomingText) {
                 await sock.sendMessage(fromJid, { 
@@ -157,9 +176,9 @@ async function startWhatsApp() {
         }
     });
 
-    // Anti-Delete (Samne wale ko koi sms nahi jayega, sirf app ke logs mein save hoga)
+    // Anti-Delete Listener
     sock.ev.on('messages.update', async (updates) => {
-        if (!antiDeleteEnabled) return;
+        if (!userSession.settings.antiDelete) return;
 
         for (const update of updates) {
             const isRevoked = update.update?.messageStubType === 68 || 
@@ -168,71 +187,114 @@ async function startWhatsApp() {
 
             if (isRevoked) {
                 const deletedMsgId = update.key.id;
-                const cached = messageStore.get(deletedMsgId);
+                const cached = userSession.messageStore.get(deletedMsgId);
 
                 if (cached && !cached.key.fromMe) {
                     const sender = cached.key.remoteJid.split('@')[0];
                     const text = cached.message.conversation || 
                                  cached.message.extendedTextMessage?.text || 
-                                 "[Media / Photo / Audio]";
+                                 "[Media File ya Sticker]";
 
-                    console.log(`[DELETED DETECTED] From: ${sender}, Text: ${text}`);
+                    console.log(`[DELETED] User: ${userId} | Sender: ${sender} | Text: ${text}`);
 
-                    deletedLogs.unshift({
+                    userSession.deletedLogs.unshift({
                         id: deletedMsgId,
                         sender: sender,
                         text: text
                     });
 
-                    if (deletedLogs.length > 50) deletedLogs.pop();
+                    if (userSession.deletedLogs.length > 60) {
+                        userSession.deletedLogs.pop();
+                    }
                 }
             }
         }
     });
 }
 
-startWhatsApp();
+// --- REST APIs (Multi-User Powered) ---
 
-// --- REST APIs ---
+// QR Generation / Check
+app.get('/qr', async (req, res) => {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: "userId parameter required" });
 
+    const userSession = getOrCreateUserSession(userId);
+
+    if (userSession.isConnected) {
+        return res.json({ status: "connected", qr: null });
+    }
+
+    if (!userSession.sock) {
+        startWhatsAppForUser(userId);
+        return res.json({ status: "waiting", message: "Session starting, try again in 3 seconds..." });
+    }
+
+    if (!userSession.qr) {
+        return res.json({ status: "waiting", message: "Generating QR code..." });
+    }
+
+    return res.json({ status: "ready", qr: userSession.qr });
+});
+
+// Status API
+app.get('/status', (req, res) => {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: "userId parameter required" });
+
+    const userSession = getOrCreateUserSession(userId);
+    return res.json({ 
+        connected: userSession.isConnected, 
+        activeChats: Array.from(userSession.activeTargets) 
+    });
+});
+
+// Config APIs
 app.get('/config', (req, res) => {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: "userId parameter required" });
+
+    const userSession = getOrCreateUserSession(userId);
     res.json({
-        message: currentMessage,
-        delaySeconds: currentDelayMs / 1000,
-        aiAutoReply: aiAutoReplyEnabled,
-        antiDelete: antiDeleteEnabled,
-        viewOnceSaver: viewOnceSaverEnabled
+        message: userSession.settings.message,
+        delaySeconds: userSession.settings.delayMs / 1000,
+        aiAutoReply: userSession.settings.aiAutoReply,
+        antiDelete: userSession.settings.antiDelete,
+        viewOnceSaver: userSession.settings.viewOnceSaver
     });
 });
 
 app.post('/config', (req, res) => {
-    const { message, delaySeconds, aiAutoReply, antiDelete, viewOnceSaver } = req.body;
-    if (message !== undefined) currentMessage = message.trim();
+    const { userId, message, delaySeconds, aiAutoReply, antiDelete, viewOnceSaver } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId parameter required" });
+
+    const userSession = getOrCreateUserSession(userId);
+
+    if (message !== undefined) userSession.settings.message = message.trim();
     if (delaySeconds !== undefined) {
         let sec = parseFloat(delaySeconds);
-        currentDelayMs = Math.max(100, Math.round(sec * 1000));
+        userSession.settings.delayMs = Math.max(100, Math.round(sec * 1000));
     }
-    if (aiAutoReply !== undefined) aiAutoReplyEnabled = Boolean(aiAutoReply);
-    if (antiDelete !== undefined) antiDeleteEnabled = Boolean(antiDelete);
-    if (viewOnceSaver !== undefined) viewOnceSaverEnabled = Boolean(viewOnceSaver);
+    if (aiAutoReply !== undefined) userSession.settings.aiAutoReply = Boolean(aiAutoReply);
+    if (antiDelete !== undefined) userSession.settings.antiDelete = Boolean(antiDelete);
+    if (viewOnceSaver !== undefined) userSession.settings.viewOnceSaver = Boolean(viewOnceSaver);
 
-    res.json({ success: true, currentMessage, delaySeconds: currentDelayMs / 1000 });
+    res.json({ 
+        success: true, 
+        currentMessage: userSession.settings.message, 
+        delaySeconds: userSession.settings.delayMs / 1000 
+    });
 });
 
+// Deleted Logs API
 app.get('/deleted-logs', (req, res) => {
-    res.json(deletedLogs);
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: "userId parameter required" });
+
+    const userSession = getOrCreateUserSession(userId);
+    res.json(userSession.deletedLogs);
 });
 
-app.get('/status', (req, res) => {
-    res.json({ connected: isConnected, activeChats: Array.from(activeTargets) });
-});
+app.get('/', (req, res) => res.send("Multi-User WhatsApp Controller Backend Live!"));
 
-app.get('/qr', (req, res) => {
-    if (isConnected) return res.json({ status: "connected", qr: null });
-    if (!currentQR) return res.json({ status: "waiting", qr: null });
-    return res.json({ status: "ready", qr: currentQR });
-});
-
-app.get('/', (req, res) => res.send("Panwar Mega WhatsApp Automation Active!"));
-
-app.listen(PORT, () => console.log(`Server live on port ${PORT}`));
+app.listen(PORT, () => console.log(`Multi-User Engine Live on port ${PORT}`));

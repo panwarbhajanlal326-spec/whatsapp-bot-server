@@ -1,5 +1,5 @@
 import express from 'express';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
 
@@ -13,7 +13,6 @@ let currentQR = null;
 let isConnected = false;
 const activeTargets = new Set();
 
-// Ye message loop me bheja jayega
 const defaultMessage = "Automated reply: Yeh system generated message hai.";
 
 async function startWhatsApp() {
@@ -22,7 +21,10 @@ async function startWhatsApp() {
     sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false
+        printQRInTerminal: false,
+        // Browser define karne se WhatsApp reject nahi karta
+        browser: Browsers.ubuntu('Chrome'),
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -32,9 +34,8 @@ async function startWhatsApp() {
 
         if (qr) {
             try {
-                // QR string ko Base64 Image URL me badalna taaki app display kar sake
                 currentQR = await QRCode.toDataURL(qr);
-                console.log("[QR] Naya QR code ready hai.");
+                console.log("[QR] Naya taza QR code generate hua.");
             } catch (err) {
                 console.error("[QR Error]", err);
             }
@@ -45,7 +46,7 @@ async function startWhatsApp() {
             currentQR = null;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            console.log(`Connection band hua (Code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+            console.log(`Connection closed (code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
             if (shouldReconnect) {
                 startWhatsApp();
             }
@@ -60,20 +61,18 @@ async function startWhatsApp() {
         const msg = m.messages[0];
         if (!msg || !msg.message) return;
 
-        // Sirf apne account se bheje gaye message track karein
         if (!msg.key.fromMe) return;
 
         const targetChat = msg.key.remoteJid;
-        if (!targetChat || targetChat.endsWith('@g.us')) return; // Group messages ignore karein
+        if (!targetChat || targetChat.endsWith('@g.us')) return;
 
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const cleanText = text.toLowerCase().trim();
 
-        // Agar "x" ya "stop" bheja ho
         if (cleanText === 'stop' || cleanText === 'x') {
             if (activeTargets.has(targetChat)) {
                 activeTargets.delete(targetChat);
-                console.log(`[STOP] Loop band kiya gaya: ${targetChat}`);
+                console.log(`[STOP] Loop band: ${targetChat}`);
                 try {
                     await sock.sendMessage(targetChat, { text: "🛑 Loop stopped." });
                 } catch (e) {}
@@ -81,11 +80,10 @@ async function startWhatsApp() {
             return;
         }
 
-        // Agar "z" bheja ho
         if (cleanText === 'z') {
             if (!activeTargets.has(targetChat)) {
                 activeTargets.add(targetChat);
-                console.log(`[START] Loop shuru hua: ${targetChat}`);
+                console.log(`[START] Loop shuru: ${targetChat}`);
 
                 (async () => {
                     while (activeTargets.has(targetChat) && isConnected) {
@@ -97,7 +95,6 @@ async function startWhatsApp() {
                             activeTargets.delete(targetChat);
                             break;
                         }
-                        // 3 second ka gap taaki WhatsApp number ban na kare
                         await sleep(3000);
                     }
                 })();
@@ -106,12 +103,8 @@ async function startWhatsApp() {
     });
 }
 
-// Bot instance shuru karein
 startWhatsApp();
 
-// --- Endpoints Android App ke liye ---
-
-// 1. Connection status check karne ka endpoint
 app.get('/status', (req, res) => {
     res.json({
         connected: isConnected,
@@ -119,13 +112,12 @@ app.get('/status', (req, res) => {
     });
 });
 
-// 2. Base64 QR code lene ka endpoint
 app.get('/qr', (req, res) => {
     if (isConnected) {
         return res.json({ status: "connected", qr: null });
     }
     if (!currentQR) {
-        return res.json({ status: "waiting", qr: null, message: "QR ban raha hai, 3 second baad reload karein." });
+        return res.json({ status: "waiting", qr: null, message: "QR ban raha hai..." });
     }
     return res.json({ status: "ready", qr: currentQR });
 });
@@ -135,5 +127,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Server port ${PORT} par active hai`);
+    console.log(`Server port ${PORT} active`);
 });

@@ -29,7 +29,7 @@ let viewOnceSaverEnabled = true;
 
 // Active spam/loop targets
 const activeTargets = new Set();
-// Message store (Anti-Delete ke liye last 1000 messages cache)
+// Message store (Anti-Delete ke liye last 1500 messages cache)
 const messageStore = new Map();
 
 async function startWhatsApp() {
@@ -80,14 +80,14 @@ async function startWhatsApp() {
         const fromJid = msg.key.remoteJid;
         const msgId = msg.key.id;
 
-        // Cache incoming messages for Anti-Delete (keep max 1000)
-        if (messageStore.size > 1000) {
+        // Cache incoming messages for Anti-Delete
+        if (messageStore.size > 1500) {
             const firstKey = messageStore.keys().next().value;
             messageStore.delete(firstKey);
         }
         messageStore.set(msgId, msg);
 
-        // Feature 4: View-Once Saver
+        // Feature: View-Once Saver
         if (viewOnceSaverEnabled && !msg.key.fromMe) {
             const isViewOnce = msg.message.viewOnceMessage || msg.message.viewOnceMessageV2;
             if (isViewOnce) {
@@ -96,18 +96,16 @@ async function startWhatsApp() {
                     console.log(`[VIEW-ONCE DETECTED] from ${fromJid}`);
                     if (actualMsg.imageMessage) {
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                        await sock.sendMessage(myJid, { 
+                        await sock.sendMessage(fromJid, { 
                             image: buffer, 
-                            caption: `🔓 *View-Once Photo Saved!* Bhejne wala: @${fromJid.split('@')[0]}`,
-                            mentions: [fromJid]
-                        });
+                            caption: `🔓 *View-Once Photo Recovered!*`
+                        }, { quoted: msg });
                     } else if (actualMsg.videoMessage) {
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                        await sock.sendMessage(myJid, { 
+                        await sock.sendMessage(fromJid, { 
                             video: buffer, 
-                            caption: `🔓 *View-Once Video Saved!* Bhejne wala: @${fromJid.split('@')[0]}`,
-                            mentions: [fromJid]
-                        });
+                            caption: `🔓 *View-Once Video Recovered!*`
+                        }, { quoted: msg });
                     }
                 } catch (e) {
                     console.error("View-once recovery error:", e);
@@ -115,7 +113,7 @@ async function startWhatsApp() {
             }
         }
 
-        // Feature: Commands Trigger (Sirf aapke bheje gaye commands)
+        // Feature: Remote Commands
         if (msg.key.fromMe) {
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             const cleanText = text.toLowerCase().trim();
@@ -147,38 +145,44 @@ async function startWhatsApp() {
             }
         }
 
-        // Feature 3: AI Auto-Reply Mode
+        // Feature: AI / Auto-Reply Mode
         if (aiAutoReplyEnabled && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
             const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
             if (incomingText) {
                 await sock.sendMessage(fromJid, { 
-                    text: `🤖 [AI Auto-Reply]: Namaste! Main abhi vyast hoon, aapka message mil gaya: "${incomingText}"` 
+                    text: `🤖 [Auto-Reply]: Namaste! Main abhi vyast hoon, aapka message mil gaya: "${incomingText}"` 
                 });
             }
         }
     });
 
-    // Feature 2: Anti-Delete Detection
+    // Feature 2: Anti-Delete Detection (Usi chat me alert + Quoted response)
     sock.ev.on('messages.update', async (updates) => {
         if (!antiDeleteEnabled) return;
 
         for (const update of updates) {
-            if (update.update?.messageStubType === 68 || update.update?.message === null) {
+            const isRevoked = update.update?.messageStubType === 68 || 
+                              update.update?.message === null || 
+                              update.update?.protocolMessage?.type === 0;
+
+            if (isRevoked) {
                 const deletedMsgId = update.key.id;
                 const cached = messageStore.get(deletedMsgId);
 
                 if (cached && !cached.key.fromMe) {
                     const sender = cached.key.remoteJid;
-                    const text = cached.message.conversation || cached.message.extendedTextMessage?.text || "[Media/Attachment]";
-                    
-                    console.log(`[DELETED MESSAGE DETECTED] From: ${sender}`);
+                    const text = cached.message.conversation || 
+                                 cached.message.extendedTextMessage?.text || 
+                                 "[Media File ya Sticker]";
+
+                    console.log(`[DELETED MESSAGE RECOVERED] Sender: ${sender}, Text: ${text}`);
+
                     try {
-                        await sock.sendMessage(myJid, {
-                            text: `🚨 *ANTI-DELETE ALERT!*\n\n👤 *Sender:* @${sender.split('@')[0]}\n💬 *Deleted Message:* ${text}`,
-                            mentions: [sender]
-                        });
+                        await sock.sendMessage(sender, {
+                            text: `🚨 *ANTI-DELETE ALERT!*\n\nDeleted message: "${text}"`
+                        }, { quoted: cached });
                     } catch (err) {
-                        console.error("Anti-delete alert failed:", err);
+                        console.error("Anti-delete alert send error:", err);
                     }
                 }
             }
@@ -190,7 +194,7 @@ startWhatsApp();
 
 // --- REST APIs for Android App ---
 
-// Config API (0.1s Support)
+// Config API
 app.get('/config', (req, res) => {
     res.json({
         message: currentMessage,
@@ -206,7 +210,7 @@ app.post('/config', (req, res) => {
     if (message !== undefined) currentMessage = message.trim();
     if (delaySeconds !== undefined) {
         let sec = parseFloat(delaySeconds);
-        // Minimum 100ms (0.1s) allow kar diya gaya hai
+        // Minimum 100ms (0.1s)
         currentDelayMs = Math.max(100, Math.round(sec * 1000));
     }
     if (aiAutoReply !== undefined) aiAutoReplyEnabled = Boolean(aiAutoReply);
@@ -216,7 +220,7 @@ app.post('/config', (req, res) => {
     res.json({ success: true, currentMessage, delaySeconds: currentDelayMs / 1000 });
 });
 
-// Feature 5: Bulk Broadcast API
+// Broadcast API
 app.post('/broadcast', async (req, res) => {
     const { numbers, text } = req.body;
     if (!numbers || !Array.isArray(numbers) || !text) {

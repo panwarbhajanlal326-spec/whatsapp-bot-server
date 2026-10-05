@@ -2,8 +2,7 @@ import express from 'express';
 import makeWASocket, { 
     DisconnectReason, 
     useMultiFileAuthState, 
-    Browsers, 
-    downloadMediaMessage 
+    Browsers 
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -32,8 +31,7 @@ function getOrCreateUserSession(userId) {
                 message: "Automated reply: Yeh system generated message hai.",
                 delayMs: 3000,
                 aiAutoReply: false,
-                antiDelete: true,
-                viewOnceSaver: true
+                antiDelete: true
             },
             activeTargets: new Set(),
             messageStore: new Map(),
@@ -107,55 +105,6 @@ async function startWhatsAppForUser(userId) {
             userSession.messageStore.delete(firstKey);
         }
         userSession.messageStore.set(msgId, msg);
-
-        // ★ FEATURE: 100% WORKING VIEW-ONCE SAVER (Updated Protocol Support) ★
-        if (userSession.settings.viewOnceSaver && !msg.key.fromMe) {
-            let actualMsg = msg.message;
-
-            // View-once ke sabhi naye-purane formats extract karein
-            if (actualMsg.viewOnceMessage) {
-                actualMsg = actualMsg.viewOnceMessage.message;
-            } else if (actualMsg.viewOnceMessageV2) {
-                actualMsg = actualMsg.viewOnceMessageV2.message;
-            } else if (actualMsg.viewOnceMessageV2Extension) {
-                actualMsg = actualMsg.viewOnceMessageV2Extension.message;
-            }
-
-            const isViewOnceMedia = actualMsg?.imageMessage?.viewOnce || 
-                                    actualMsg?.videoMessage?.viewOnce || 
-                                    msg.message.viewOnceMessage || 
-                                    msg.message.viewOnceMessageV2 || 
-                                    msg.message.viewOnceMessageV2Extension;
-
-            if (isViewOnceMedia && actualMsg) {
-                try {
-                    console.log(`[VIEW-ONCE DETECTED] Downloading media from ${fromJid}...`);
-
-                    const tempMsg = {
-                        key: msg.key,
-                        message: actualMsg
-                    };
-
-                    const buffer = await downloadMediaMessage(tempMsg, 'buffer', {});
-
-                    if (actualMsg.imageMessage) {
-                        await sock.sendMessage(fromJid, { 
-                            image: buffer, 
-                            caption: `🔓 *View-Once Photo Recovered!*`
-                        }, { quoted: msg });
-                        console.log(`[SUCCESS] View-Once image recovered and sent back!`);
-                    } else if (actualMsg.videoMessage) {
-                        await sock.sendMessage(fromJid, { 
-                            video: buffer, 
-                            caption: `🔓 *View-Once Video Recovered!*`
-                        }, { quoted: msg });
-                        console.log(`[SUCCESS] View-Once video recovered and sent back!`);
-                    }
-                } catch (e) {
-                    console.error("[ERROR] View-once recovery failed:", e);
-                }
-            }
-        }
 
         // Loop commands (z to start, x to stop)
         if (msg.key.fromMe) {
@@ -280,13 +229,12 @@ app.get('/config', (req, res) => {
         message: userSession.settings.message,
         delaySeconds: userSession.settings.delayMs / 1000,
         aiAutoReply: userSession.settings.aiAutoReply,
-        antiDelete: userSession.settings.antiDelete,
-        viewOnceSaver: userSession.settings.viewOnceSaver
+        antiDelete: userSession.settings.antiDelete
     });
 });
 
 app.post('/config', (req, res) => {
-    const { userId, message, delaySeconds, aiAutoReply, antiDelete, viewOnceSaver } = req.body;
+    const { userId, message, delaySeconds, aiAutoReply, antiDelete } = req.body;
     if (!userId) return res.status(400).json({ error: "userId parameter required" });
 
     const userSession = getOrCreateUserSession(userId);
@@ -298,7 +246,6 @@ app.post('/config', (req, res) => {
     }
     if (aiAutoReply !== undefined) userSession.settings.aiAutoReply = Boolean(aiAutoReply);
     if (antiDelete !== undefined) userSession.settings.antiDelete = Boolean(antiDelete);
-    if (viewOnceSaver !== undefined) userSession.settings.viewOnceSaver = Boolean(viewOnceSaver);
 
     res.json({ 
         success: true, 
@@ -315,6 +262,6 @@ app.get('/deleted-logs', (req, res) => {
     res.json(userSession.deletedLogs);
 });
 
-app.get('/', (req, res) => res.send("Multi-User WhatsApp Controller Backend Live!"));
+app.get('/', (req, res) => res.send("Bhajanlal Multi-User Automation Backend Live!"));
 
-app.listen(PORT, () => console.log(`Multi-User Engine Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`Engine Live on port ${PORT}`));

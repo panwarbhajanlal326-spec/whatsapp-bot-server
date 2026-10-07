@@ -16,8 +16,56 @@ app.use(express.json());
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// --- GROQ AI CONFIGURATION ---
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+const AI_MODEL = "openai/gpt-oss-120b";
+
+// --- SMART AI REPLY FUNCTION ---
+async function getAIReply(userText) {
+    try {
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${GROQ_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: AI_MODEL,
+                messages: [
+                    {
+                        role: "system",
+                        content: `Aap WhatsApp par ek bohot hi smart, respectful aur friendly Indian assistant ho.
+
+Rules for Replies:
+1. LANGUAGE MATCHING: User jis bhasha aur script me message karega, usi bhasha me reply do:
+   - Hinglish me ho toh Hinglish me bolo.
+   - Hindi (Devanagari) me ho toh Hindi me bolo.
+   - English me ho toh English me bolo.
+   - Rajasthani/Marwari/Desi andaz ho toh prem se usi bhasha me bolo.
+2. WHATSAPP STYLE: Jawab hamesha chhota (1-3 lines), direct aur WhatsApp chat jaisa natural hona chahiye. Faltu paragraphs ya options bilkul mat likhna.
+3. PERSONALITY: Dostana andaz rakho, zarurat padne par suitable emoji use karo.
+4. NO ROBOT TALK: Kabhi mat bolo ki 'Mai ek AI hu' jab tak user khud na puche. System reasoning, thinking process ya options show mat karna.`
+                    },
+                    {
+                        role: "user",
+                        content: userText
+                    }
+                ]
+            })
+        });
+
+        const data = await response.json();
+        if (data.choices && data.choices[0]?.message?.content) {
+            return data.choices[0].message.content.trim();
+        }
+        return null;
+    } catch (err) {
+        console.error("Groq AI Error:", err.message);
+        return null;
+    }
+}
+
 // Multi-Session Memory Store
-// Structure: userId -> { sock, qr, isConnected, myJid, settings, activeTargets, messageStore, deletedLogs }
 const sessions = new Map();
 
 function getOrCreateUserSession(userId) {
@@ -99,14 +147,14 @@ async function startWhatsAppForUser(userId) {
         const fromJid = msg.key.remoteJid;
         const msgId = msg.key.id;
 
-        // Cache incoming messages for Anti-Delete
+        // Anti-Delete ke liye cache message store karna
         if (userSession.messageStore.size > 1500) {
             const firstKey = userSession.messageStore.keys().next().value;
             userSession.messageStore.delete(firstKey);
         }
         userSession.messageStore.set(msgId, msg);
 
-        // Loop commands (z to start, x to stop)
+        // Loop commands (z se start, x/stop se band)
         if (msg.key.fromMe) {
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             const cleanText = text.toLowerCase().trim();
@@ -138,13 +186,19 @@ async function startWhatsAppForUser(userId) {
             }
         }
 
-        // Auto Reply
+        // --- SMART AI AUTO-REPLY (GROQ 120B ENGINE) ---
         if (userSession.settings.aiAutoReply && !msg.key.fromMe && !fromJid.endsWith('@g.us')) {
             const incomingText = msg.message.conversation || msg.message.extendedTextMessage?.text;
-            if (incomingText) {
-                await sock.sendMessage(fromJid, { 
-                    text: `🤖 [Auto-Reply]: Namaste! Main abhi vyast hoon, aapka message mil gaya: "${incomingText}"` 
-                });
+            if (incomingText && incomingText.trim()) {
+                console.log(`[AI Incoming] User: ${userId} | Msg: "${incomingText}"`);
+
+                const aiResponse = await getAIReply(incomingText);
+                if (aiResponse) {
+                    await sock.sendPresenceUpdate('composing', fromJid);
+                    await sleep(600); // 0.6 second typing effect
+                    await sock.sendMessage(fromJid, { text: aiResponse });
+                    console.log(`[AI Sent] User: ${userId} | Reply: "${aiResponse}"`);
+                }
             }
         }
     });

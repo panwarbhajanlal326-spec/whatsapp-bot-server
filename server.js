@@ -18,7 +18,7 @@ app.use(express.json());
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- GROQ AI CONFIGURATION ---
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
 const AI_MODEL = "openai/gpt-oss-120b";
 
 // --- SMART AI REPLY FUNCTION ---
